@@ -11,7 +11,7 @@ use crate::types::enums::is_single_member_enum;
 use crate::types::function::FunctionDecorators;
 use crate::types::set_theoretic::RecursivelyDefined;
 use crate::types::{
-    ApplyTypeMappingVisitor, CallableType, ClassBase, ClassType, CycleDetector,
+    ApplyTypeMappingVisitor, CallableType, ClassBase, ClassLiteral, ClassType, CycleDetector,
     KnownBoundMethodType, KnownClass, KnownInstanceType, LiteralValueTypeKind, MemberLookupPolicy,
     PropertyInstanceType, ProtocolInstanceType, SubclassOfInner, TypeVarBoundOrConstraints,
     UnionType, UpcastPolicy,
@@ -322,17 +322,16 @@ impl<'db> Type<'db> {
         constraints: &'c ConstraintSetBuilder<'db>,
         inferable: InferableTypeVars<'db>,
     ) -> ConstraintSet<'db, 'c> {
-        let relation_visitor = HasRelationToVisitor::default(constraints);
-        let disjointness_visitor = IsDisjointVisitor::default(constraints);
         let materialization_visitor = ApplyTypeMappingVisitor::default();
         let checker = TypeRelationChecker {
             constraints,
             inferable,
             relation: TypeRelation::SubtypingAssuming,
             given: assuming,
-            relation_visitor: &relation_visitor,
-            disjointness_visitor: &disjointness_visitor,
+            relation_visitor: &HasRelationToVisitor::default(constraints),
+            disjointness_visitor: &IsDisjointVisitor::default(constraints),
             materialization_visitor: &materialization_visitor,
+            protocol_relation_visitor: &ProtocolRelationVisitor::default(constraints),
         };
         checker.check_type_pair(db, self, target)
     }
@@ -424,17 +423,16 @@ impl<'db> Type<'db> {
         inferable: InferableTypeVars<'db>,
         relation: TypeRelation,
     ) -> ConstraintSet<'db, 'c> {
-        let relation_visitor = HasRelationToVisitor::default(constraints);
-        let disjointness_visitor = IsDisjointVisitor::default(constraints);
         let materialization_visitor = ApplyTypeMappingVisitor::default();
         let checker = TypeRelationChecker {
             constraints,
             inferable,
             relation,
             given: ConstraintSet::from_bool(constraints, false),
-            relation_visitor: &relation_visitor,
-            disjointness_visitor: &disjointness_visitor,
+            relation_visitor: &HasRelationToVisitor::default(constraints),
+            disjointness_visitor: &IsDisjointVisitor::default(constraints),
             materialization_visitor: &materialization_visitor,
+            protocol_relation_visitor: &ProtocolRelationVisitor::default(constraints),
         };
         checker.check_type_pair(db, self, target)
     }
@@ -493,14 +491,13 @@ impl<'db> Type<'db> {
         constraints: &'c ConstraintSetBuilder<'db>,
         materialization_visitor: &ApplyTypeMappingVisitor<'db>,
     ) -> ConstraintSet<'db, 'c> {
-        let relation_visitor = HasRelationToVisitor::default(constraints);
-        let disjointness_visitor = IsDisjointVisitor::default(constraints);
         let checker = EquivalenceChecker {
             constraints,
             given: ConstraintSet::from_bool(constraints, false),
-            relation_visitor: &relation_visitor,
-            disjointness_visitor: &disjointness_visitor,
+            relation_visitor: &HasRelationToVisitor::default(constraints),
+            disjointness_visitor: &IsDisjointVisitor::default(constraints),
             materialization_visitor,
+            protocol_relation_visitor: &ProtocolRelationVisitor::default(constraints),
         };
         checker.check_type_pair(db, self, other)
     }
@@ -533,16 +530,15 @@ impl<'db> Type<'db> {
         constraints: &'c ConstraintSetBuilder<'db>,
         inferable: InferableTypeVars<'db>,
     ) -> ConstraintSet<'db, 'c> {
-        let relation_visitor = HasRelationToVisitor::default(constraints);
-        let disjointness_visitor = IsDisjointVisitor::default(constraints);
         let materialization_visitor = ApplyTypeMappingVisitor::default();
         let checker = DisjointnessChecker {
             constraints,
             inferable,
             given: ConstraintSet::from_bool(constraints, false),
-            disjointness_visitor: &disjointness_visitor,
-            relation_visitor: &relation_visitor,
+            disjointness_visitor: &IsDisjointVisitor::default(constraints),
+            relation_visitor: &HasRelationToVisitor::default(constraints),
             materialization_visitor: &materialization_visitor,
+            protocol_relation_visitor: &ProtocolRelationVisitor::default(constraints),
         };
         checker.check_type_pair(db, self, other)
     }
@@ -555,6 +551,27 @@ pub(crate) type HasRelationToVisitor<'db, 'c> =
 impl<'db, 'c> HasRelationToVisitor<'db, 'c> {
     pub(crate) fn default(constraints: &'c ConstraintSetBuilder<'db>) -> Self {
         HasRelationToVisitor::new(ConstraintSet::from_bool(constraints, true))
+    }
+}
+
+/// A recursion guard for structural protocol checks keyed by class origins rather than full
+/// specializations.
+///
+/// Recursive self-type protocols can keep producing fresh `(source, target)` pairs even though the
+/// underlying source and target class definitions are the same. In those cases we conservatively
+/// assume compatibility once we revisit the same class origins through a nested protocol check.
+pub(crate) type ProtocolRelationVisitor<'db, 'c> = CycleDetector<
+    ProtocolRelation,
+    (ClassLiteral<'db>, ClassLiteral<'db>, TypeRelation),
+    ConstraintSet<'db, 'c>,
+>;
+
+#[derive(Debug)]
+pub(crate) struct ProtocolRelation;
+
+impl<'db, 'c> ProtocolRelationVisitor<'db, 'c> {
+    pub(crate) fn default(constraints: &'c ConstraintSetBuilder<'db>) -> Self {
+        ProtocolRelationVisitor::new(ConstraintSet::from_bool(constraints, true))
     }
 }
 
@@ -586,6 +603,7 @@ pub(super) struct TypeRelationChecker<'a, 'c, 'db> {
     relation_visitor: &'a HasRelationToVisitor<'db, 'c>,
     disjointness_visitor: &'a IsDisjointVisitor<'db, 'c>,
     pub(super) materialization_visitor: &'a ApplyTypeMappingVisitor<'db>,
+    protocol_relation_visitor: &'a ProtocolRelationVisitor<'db, 'c>,
 }
 
 impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
@@ -595,6 +613,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
         relation_visitor: &'a HasRelationToVisitor<'db, 'c>,
         disjointness_visitor: &'a IsDisjointVisitor<'db, 'c>,
         materialization_visitor: &'a ApplyTypeMappingVisitor<'db>,
+        protocol_relation_visitor: &'a ProtocolRelationVisitor<'db, 'c>,
     ) -> Self {
         Self {
             constraints,
@@ -604,6 +623,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             relation_visitor,
             disjointness_visitor,
             materialization_visitor,
+            protocol_relation_visitor,
         }
     }
 
@@ -612,6 +632,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
         relation_visitor: &'a HasRelationToVisitor<'db, 'c>,
         disjointness_visitor: &'a IsDisjointVisitor<'db, 'c>,
         materialization_visitor: &'a ApplyTypeMappingVisitor<'db>,
+        protocol_relation_visitor: &'a ProtocolRelationVisitor<'db, 'c>,
     ) -> Self {
         Self {
             constraints,
@@ -621,6 +642,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             relation_visitor,
             disjointness_visitor,
             materialization_visitor,
+            protocol_relation_visitor,
         }
     }
 
@@ -647,6 +669,34 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
     ) -> ConstraintSet<'db, 'c> {
         self.relation_visitor
             .visit((source, target, self.relation), work)
+    }
+
+    pub(super) fn with_protocol_recursion_guard(
+        &self,
+        db: &'db dyn Db,
+        source: Type<'db>,
+        target: ProtocolInstanceType<'db>,
+        work: impl FnOnce() -> ConstraintSet<'db, 'c>,
+    ) -> ConstraintSet<'db, 'c> {
+        let Some(source_class) = (match source {
+            Type::NominalInstance(nominal) => Some(nominal.class_literal(db)),
+            Type::ProtocolInstance(protocol) => protocol
+                .to_nominal_instance()
+                .map(|nominal| nominal.class_literal(db)),
+            _ => None,
+        }) else {
+            return work();
+        };
+
+        let Some(target_class) = target
+            .to_nominal_instance()
+            .map(|nominal| nominal.class_literal(db))
+        else {
+            return work();
+        };
+
+        self.protocol_relation_visitor
+            .visit((source_class, target_class, self.relation), work)
     }
 
     /// Return a constraint set indicating the conditions under which `self.relation` holds between `source` and `target`.
@@ -1590,6 +1640,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             relation_visitor: self.relation_visitor,
             disjointness_visitor: self.disjointness_visitor,
             materialization_visitor: self.materialization_visitor,
+            protocol_relation_visitor: self.protocol_relation_visitor,
         }
     }
 
@@ -1601,6 +1652,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             relation_visitor: self.relation_visitor,
             disjointness_visitor: self.disjointness_visitor,
             materialization_visitor: self.materialization_visitor,
+            protocol_relation_visitor: self.protocol_relation_visitor,
         }
     }
 }
@@ -1618,6 +1670,7 @@ pub(super) struct EquivalenceChecker<'a, 'c, 'db> {
     relation_visitor: &'a HasRelationToVisitor<'db, 'c>,
     disjointness_visitor: &'a IsDisjointVisitor<'db, 'c>,
     materialization_visitor: &'a ApplyTypeMappingVisitor<'db>,
+    protocol_relation_visitor: &'a ProtocolRelationVisitor<'db, 'c>,
 }
 
 impl<'c, 'db> EquivalenceChecker<'_, 'c, 'db> {
@@ -1633,6 +1686,7 @@ impl<'c, 'db> EquivalenceChecker<'_, 'c, 'db> {
             relation_visitor: self.relation_visitor,
             disjointness_visitor: self.disjointness_visitor,
             materialization_visitor,
+            protocol_relation_visitor: self.protocol_relation_visitor,
         }
     }
 
@@ -1680,6 +1734,7 @@ pub(super) struct DisjointnessChecker<'a, 'c, 'db> {
     disjointness_visitor: &'a IsDisjointVisitor<'db, 'c>,
     relation_visitor: &'a HasRelationToVisitor<'db, 'c>,
     materialization_visitor: &'a ApplyTypeMappingVisitor<'db>,
+    protocol_relation_visitor: &'a ProtocolRelationVisitor<'db, 'c>,
 }
 
 impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
@@ -1689,6 +1744,7 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
         relation_visitor: &'a HasRelationToVisitor<'db, 'c>,
         disjointness_visitor: &'a IsDisjointVisitor<'db, 'c>,
         materialization_visitor: &'a ApplyTypeMappingVisitor<'db>,
+        protocol_relation_visitor: &'a ProtocolRelationVisitor<'db, 'c>,
     ) -> Self {
         Self {
             constraints,
@@ -1697,6 +1753,7 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
             disjointness_visitor,
             relation_visitor,
             materialization_visitor,
+            protocol_relation_visitor,
         }
     }
 
@@ -1712,6 +1769,7 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
             relation_visitor: self.relation_visitor,
             disjointness_visitor: self.disjointness_visitor,
             materialization_visitor: self.materialization_visitor,
+            protocol_relation_visitor: self.protocol_relation_visitor,
         }
     }
 
@@ -1722,6 +1780,7 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
             relation_visitor: self.relation_visitor,
             disjointness_visitor: self.disjointness_visitor,
             materialization_visitor: self.materialization_visitor,
+            protocol_relation_visitor: self.protocol_relation_visitor,
         }
     }
 
