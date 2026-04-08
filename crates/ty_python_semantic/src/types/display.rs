@@ -1246,7 +1246,7 @@ impl<'db> FmtDetailed<'db> for DisplayRepresentation<'db> {
                 f.write_str(", ")?;
                 bound_super
                     .owner(self.db)
-                    .owner_type(self.db)
+                    .owner_type()
                     .display_with(self.db, self.settings.singleline())
                     .fmt_detailed(f)?;
                 f.write_str(">")
