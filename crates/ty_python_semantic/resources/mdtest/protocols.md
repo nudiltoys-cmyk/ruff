@@ -3314,6 +3314,32 @@ def f(c: C[int]) -> None:
     takes_c(c)
 ```
 
+### Recursive protocol comparisons still distinguish different protocol classes
+
+We still need to distinguish specializations when the recursive comparison is between different
+protocol classes, or we'll incorrectly accept incompatible protocols.
+
+```toml
+[environment]
+python-version = "3.12"
+```
+
+```py
+from typing import Protocol
+
+class Source[T](Protocol):
+    def value(self) -> T: ...
+    def next(self) -> "Source[list[T]]": ...
+
+class Target[U](Protocol):
+    def value(self) -> U: ...
+    def next(self) -> "Target[list[U]]": ...
+
+def takes_target(x: Target[int]) -> None: ...
+def f(x: Source[bool]) -> None:
+    takes_target(x)  # error: [invalid-argument-type]
+```
+
 ### Recursive generic protocols with multiple growing self-type wrappers
 
 This regression test covers <https://github.com/astral-sh/ty/issues/3208>. Unlike issue #1736, the

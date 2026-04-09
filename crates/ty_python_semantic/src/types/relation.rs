@@ -554,8 +554,8 @@ impl<'db, 'c> HasRelationToVisitor<'db, 'c> {
     }
 }
 
-/// A recursion guard for structural protocol checks keyed by class origins rather than full
-/// specializations.
+/// A recursion guard for structural protocol checks on the same protocol class, keyed by class
+/// origins rather than full specializations.
 ///
 /// Recursive self-type protocols can keep producing fresh `(source, target)` pairs even though the
 /// underlying source and target class definitions are the same. In those cases we conservatively
@@ -694,6 +694,10 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
         else {
             return work();
         };
+
+        if source_class != target_class {
+            return work();
+        }
 
         self.protocol_relation_visitor
             .visit((source_class, target_class, self.relation), work)
